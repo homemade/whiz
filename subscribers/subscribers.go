@@ -4,8 +4,15 @@ import (
 	"time"
 )
 
+type Definition struct {
+	Name     string
+	Version  string
+	Instance string
+	MetaData string
+}
+
 type Registry interface {
-	LoadRoutine(routine string, version string, instance string, metadata string, apimetrics APIMetrics) (Routine, error)
+	LoadRoutine(definition Definition, apimetrics APIMetrics) (Routine, error)
 }
 
 type APIMetrics interface {

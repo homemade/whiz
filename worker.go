@@ -284,7 +284,12 @@ func (w *BackgroundWorker) runEventLoops(t time.Time) {
 			logMetrics(w.loggerOutput, fmt.Sprintf("worker_routines:%d", grp), len(dbRoutines), time.Since(t).Seconds())
 			for _, r := range dbRoutines {
 				var sr subscribers.Routine
-				sr, err = w.reg.LoadRoutine(r.Name, r.Version, r.Instance, r.MetaData, w.status)
+				sr, err = w.reg.LoadRoutine(subscribers.Definition{
+					Name:     r.Name,
+					Version:  r.Version,
+					Instance: r.Instance,
+					MetaData: r.MetaData,
+				}, w.status)
 				if err != nil {
 					logError(w.loggerOutput, &echo.HTTPError{Message: "failed to load subscriber routine", Code: http.StatusInternalServerError, Internal: err})
 					return
