@@ -44,7 +44,7 @@ type Event interface {
 type Result interface {
 	MetaData() string
 	Status() string
-	ReferTable() string
+	ReferEntity() string
 	ReferID() string
 	Ignored() bool
 }

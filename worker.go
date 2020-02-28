@@ -443,7 +443,7 @@ func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzSubscriber, e error, eventid string, res subscribers.Result) {
 
 	stmt, err := dbRW.Prepare(`INSERT INTO eventz_subscriber_error_logs
-(event_id,routine_name,routine_version,routine_instance,error_code,error_message,status,refer_table,refer_id,created_at)
+(event_id,routine_name,routine_version,routine_instance,error_code,error_message,status,refer_entity,refer_id,created_at)
 VALUES(?,?,?,?,?,?,?,?,?,NOW(6));`)
 	if err != nil {
 		logError(loggerOutput, err)
@@ -462,7 +462,7 @@ VALUES(?,?,?,?,?,?,?,?,?,NOW(6));`)
 		code = he.Code
 		cause = he.Internal
 	}
-	_, err = stmt.Exec(eventid, sub.Name, sub.Version, sub.Instance, code, fmt.Sprintf("Error: %v \nCause: %v", e, cause), res.Status(), res.ReferTable(), res.ReferID())
+	_, err = stmt.Exec(eventid, sub.Name, sub.Version, sub.Instance, code, fmt.Sprintf("Error: %v \nCause: %v", e, cause), res.Status(), res.ReferEntity(), res.ReferID())
 	if err != nil {
 		logError(loggerOutput, err)
 		return
@@ -577,10 +577,10 @@ func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, e
 
 	if !res.Ignored() {
 		stmt = `INSERT INTO eventz_subscriber_processed_logs
-		(event_id,routine_name,routine_version,routine_instance,meta_data,status,refer_table,refer_id,created_at)
+		(event_id,routine_name,routine_version,routine_instance,meta_data,status,refer_entity,refer_id,created_at)
 		VALUES(?,?,?,?,?,?,?,?,NOW(6));`
 
-		result, err = dbRW.Exec(stmt, event.EventID, sub.Name, sub.Version, sub.Instance, res.MetaData(), res.Status(), res.ReferTable(), res.ReferID())
+		result, err = dbRW.Exec(stmt, event.EventID, sub.Name, sub.Version, sub.Instance, res.MetaData(), res.Status(), res.ReferEntity(), res.ReferID())
 		if err != nil {
 			return err
 		}

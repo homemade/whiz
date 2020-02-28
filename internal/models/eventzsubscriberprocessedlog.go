@@ -16,6 +16,6 @@ type EventzSubscriberProcessedLog struct {
 	MetaData        string
 	Status          string
 
-	ReferTable string
-	ReferID    string
+	ReferEntity string
+	ReferID     string
 }

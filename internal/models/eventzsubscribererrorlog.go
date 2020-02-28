@@ -19,6 +19,6 @@ type EventzSubscriberErrorLog struct {
 	ErrorMessage    string
 	Status          string
 
-	ReferTable string
-	ReferID    string
+	ReferEntity string
+	ReferID     string
 }
