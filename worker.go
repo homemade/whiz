@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/homemade/whiz/internal/models"
 	"github.com/homemade/whiz/subscribers"
-	"github.com/labstack/echo"
 )
 
 type BackgroundWorkerStatus struct {
@@ -75,6 +73,38 @@ type BackgroundWorker struct {
 	active          bool
 	status          *BackgroundWorkerStatus
 	shutdown        bool
+}
+
+type cancelledFunc func() bool
+
+type eventLoopParams struct {
+	Started      time.Time
+	DBRW         *sql.DB
+	DBRO         *sql.DB
+	LoggerOutput io.Writer
+	LockName     string
+	ErrorCeiling time.Duration
+	Metrics      subscribers.APIMetrics
+	Cancelled    cancelledFunc
+	Registry     subscribers.Registry
+}
+
+type ErrorWithCause interface {
+	error
+	Cause() error
+}
+
+type errWithCause struct {
+	err   string
+	cause error
+}
+
+func (e errWithCause) Error() string {
+	return e.err
+}
+
+func (e errWithCause) Cause() error {
+	return e.cause
 }
 
 func NewBackgroundWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io.Writer, options ...func(*BackgroundWorker) error) (*BackgroundWorker, error) {
@@ -202,7 +232,18 @@ func (w *BackgroundWorker) nextRun(t time.Time) {
 		wrk.active = false
 		wrk.mu.Unlock()
 	}(w)
-	w.runEventLoops(t)
+	runEventLoops(eventLoopParams{
+		Started:      t,
+		DBRW:         w.dbRW,
+		DBRO:         w.dbRO,
+		LoggerOutput: w.loggerOutput,
+		LockName:     w.lockName,
+		ErrorCeiling: w.errorCeiling,
+		Metrics:      w.status,
+		Cancelled: cancelledFunc(func() bool {
+			return w.shutdown
+		}),
+	})
 }
 
 func (w *BackgroundWorker) Shutdown() {
@@ -220,7 +261,7 @@ func (w *BackgroundWorker) Shutdown() {
 	}
 }
 
-func (w *BackgroundWorker) runEventLoops(t time.Time) {
+func runEventLoops(p eventLoopParams) {
 
 	// NOTE: use read only db where at all possible in the worker (this frees up the read write db for the web server)
 
@@ -228,27 +269,27 @@ func (w *BackgroundWorker) runEventLoops(t time.Time) {
 	// we utilise MySQL locks for this
 	var err error
 	var lockTran *sql.Tx // we need to keep a handle on the transaction that opens the lock so we can release it later
-	lockTran, err = w.dbRO.Begin()
+	lockTran, err = p.DBRO.Begin()
 	var locked int
-	if err = lockTran.QueryRow(fmt.Sprintf("SELECT GET_LOCK('%s',1);", w.lockName)).Scan(&locked); err != nil {
-		logError(w.loggerOutput, &echo.HTTPError{Message: "failed to acquire worker lock", Internal: err})
+	if err = lockTran.QueryRow(fmt.Sprintf("SELECT GET_LOCK('%s',1);", p.LockName)).Scan(&locked); err != nil {
+		logError(p.LoggerOutput, errWithCause{"failed to acquire worker lock", err})
 		return
 	}
-	if locked != 1 { // failed to acquire worker lock - another worker process is still running so just return
-		logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker cancelled next run as detected another worker process running %v", w.status))
+	if locked != 1 { // failed to acquire lock - another process is still running so just return
+		logInfo(p.LoggerOutput, "next run cancelled as detected another process is still running")
 		return
 	}
 	defer func() {
 		var unlocked int
-		if err = lockTran.QueryRow(fmt.Sprintf("SELECT RELEASE_LOCK('%s');", w.lockName)).Scan(&unlocked); err != nil {
-			logError(w.loggerOutput, &echo.HTTPError{Message: "failed to release worker lock during clean exit", Internal: err})
+		if err = lockTran.QueryRow(fmt.Sprintf("SELECT RELEASE_LOCK('%s');", p.LockName)).Scan(&unlocked); err != nil {
+			logError(p.LoggerOutput, errWithCause{"failed to release worker lock during clean exit", err})
 		} else {
 			if unlocked != 1 {
-				logError(w.loggerOutput, &echo.HTTPError{Message: "failed to release worker lock during clean exit"})
+				logError(p.LoggerOutput, errors.New("failed to release worker lock during clean exit"))
 			}
 		}
 		if err = lockTran.Commit(); err != nil {
-			logError(w.loggerOutput, &echo.HTTPError{Message: "failed to commit worker lock during clean exit", Internal: err})
+			logError(p.LoggerOutput, errWithCause{"failed to commit worker lock during clean exit", err})
 		}
 		return
 	}()
@@ -265,61 +306,61 @@ func (w *BackgroundWorker) runEventLoops(t time.Time) {
 			defer func() {
 				wg.Done()
 				if err != nil {
-					logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with error %v", grp, err))
+					logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with error %v", grp, err))
 				} else {
 					if r := recover(); r != nil {
-						logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with unhandled error %v", grp, r))
+						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with unhandled error %v", grp, r))
 					} else {
-						logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done", grp))
+						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done", grp))
 					}
 				}
 			}()
 			// NOTE: use read only db where at all possible in the worker (this frees up the read/write db for the web server)
 			var dbRoutines []models.EventzSubscriber
-			dbRoutines, err = readRoutinesFromDB(w.dbRO, grp, w.errorCeiling)
+			dbRoutines, err = readRoutinesFromDB(p.DBRO, grp, p.ErrorCeiling)
 			if err != nil {
-				logError(w.loggerOutput, &echo.HTTPError{Message: "failed to read dbRoutines", Code: http.StatusInternalServerError, Internal: err})
+				logError(p.LoggerOutput, errWithCause{"failed to read dbRoutines", err})
 				return
 			}
-			logMetrics(w.loggerOutput, fmt.Sprintf("worker_routines:%d", grp), len(dbRoutines), time.Since(t).Seconds())
+			logMetrics(p.LoggerOutput, fmt.Sprintf("worker_routines:%d", grp), len(dbRoutines), time.Since(p.Started).Seconds())
 			for _, r := range dbRoutines {
 				var sr subscribers.Routine
-				sr, err = w.reg.LoadRoutine(subscribers.Definition{
+				sr, err = p.Registry.LoadRoutine(subscribers.Definition{
 					Name:     r.Name,
 					Version:  r.Version,
 					Instance: r.Instance,
 					MetaData: r.MetaData,
-				}, w.status)
+				}, p.Metrics)
 				if err != nil {
-					logError(w.loggerOutput, &echo.HTTPError{Message: "failed to load subscriber routine", Code: http.StatusInternalServerError, Internal: err})
+					logError(p.LoggerOutput, errWithCause{"failed to load subscriber routine", err})
 					return
 				}
-				err = updateLastRunAtInDB(w.dbRW, r)
+				err = updateLastRunAtInDB(p.DBRW, r)
 				if err != nil {
-					logError(w.loggerOutput, &echo.HTTPError{Message: fmt.Sprintf("failed to update last_run_at during execution of %s", r.Desc()), Code: http.StatusInternalServerError, Internal: err})
+					logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to update last_run_at during execution of %s", r.Desc()), err})
 					return
 				}
 				var events SubscriberEvents
-				events, err = readSubscriberEventsFromDB(w.dbRO, r.Group, r.Priority, sr.EventSources(), sr.EventLoopCeiling())
+				events, err = readSubscriberEventsFromDB(p.DBRO, r.Group, r.Priority, sr.EventSources(), sr.EventLoopCeiling())
 				if err != nil {
-					logError(w.loggerOutput, &echo.HTTPError{Message: fmt.Sprintf("failed to read subscriber events during execution of %s", r.Desc()), Code: http.StatusInternalServerError, Internal: err})
+					logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to read subscriber events during execution of %s", r.Desc()), err})
 					return
 				}
-				logMetrics(w.loggerOutput, fmt.Sprintf("worker_events:%d.%d", r.Group, r.Priority), len(events), time.Since(t).Seconds())
+				logMetrics(p.LoggerOutput, fmt.Sprintf("worker_events:%d.%d", r.Group, r.Priority), len(events), time.Since(p.Started).Seconds())
 				processedEvents := 0
 				for _, e := range events {
-					// handle shutdown requests
-					if w.shutdown {
-						logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d exiting event loop due to shutdown request", grp))
+					// handle cancellation requests
+					if p.Cancelled() {
+						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d exiting event loop due to cancellation request", grp))
 						break
 					}
 					var procResult subscribers.Result
 					procResult, err = sr.ProcessEvent(e)
 					if err != nil {
-						temporaryError, status := sr.IsTemporaryError(err)
+						temporaryError, skippableError, status := sr.AssertError(err)
 						if !temporaryError { // we don't put events on hold for temporary errors - we will try again later
-							if dberr := markSubscriberEventAsOnHold(w.dbRW, e.EventID); dberr != nil {
-								logError(w.loggerOutput, &echo.HTTPError{Message: fmt.Sprintf("failed to mark event#%s as onhold", e.EventID), Code: http.StatusInternalServerError, Internal: dberr})
+							if dberr := markSubscriberEventAsOnHold(p.DBRW, e.EventID); dberr != nil {
+								logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to mark event#%s as onhold", e.EventID), dberr})
 							}
 						}
 						// augment the error with extra details
@@ -331,35 +372,28 @@ func (w *BackgroundWorker) runEventLoops(t time.Time) {
 							msg = fmt.Sprintf("%s when processing event #%s", msg, e.EventID)
 						}
 						// and log it
-						cause := err
-						if he, ok := err.(*echo.HTTPError); ok {
-							cause = he.Internal
-						}
-						logError(w.loggerOutput, &echo.HTTPError{Message: msg, Code: status, Internal: cause})
-						if err2 := updateLastErrorAtInDB(w.dbRW, r); err2 != nil {
-							logError(w.loggerOutput, &echo.HTTPError{Message: fmt.Sprintf("failed to update last_error_at during execution of %s", r.Desc()), Code: http.StatusInternalServerError, Internal: err2})
+						logError(p.LoggerOutput, errWithCause{msg, err})
+						if err2 := updateLastErrorAtInDB(p.DBRW, r); err2 != nil {
+							logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to update last_error_at during execution of %s", r.Desc()), err2})
 						}
 						// try and also add error to the log table
-						insertIntoErrorLog(w.loggerOutput, w.dbRW, r, err, e.EventID, procResult)
+						insertIntoErrorLog(p.LoggerOutput, p.DBRW, r, err, status, e.EventID, procResult)
 
-						// dont break out of the loop for temporary 424 Failed Dependency errors
-						// (these are a special case of temporary error used to try and handle events that are out of sequence)
-						temporaryFailedDependencyError := temporaryError && (status == http.StatusFailedDependency)
-						// and skippable errors - these will be left on hold
-						if !temporaryFailedDependencyError || !sr.IsSkippableError(err) {
+						// dont break out of the loop for skippable errors - these will be left on hold
+						if !skippableError {
 							break
 						}
 
 					} else {
 						processedEvents = processedEvents + 1
-						err = markSubscriberEventAsProcessed(w.dbRW, r, e, procResult)
+						err = markSubscriberEventAsProcessed(p.DBRW, r, e, procResult)
 						if err != nil {
-							logError(w.loggerOutput, &echo.HTTPError{Message: fmt.Sprintf("failed to mark event#%s as processed", e.EventID), Code: http.StatusInternalServerError, Internal: err})
+							logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to mark event#%s as processed", e.EventID), err})
 							return
 						}
 					}
 				}
-				logMetrics(w.loggerOutput, fmt.Sprintf("worker_processed:%d.%d", r.Group, r.Priority), processedEvents, time.Since(t).Seconds())
+				logMetrics(p.LoggerOutput, fmt.Sprintf("worker_processed:%d.%d", r.Group, r.Priority), processedEvents, time.Since(p.Started).Seconds())
 				if err != nil {
 					return
 				}
@@ -369,7 +403,8 @@ func (w *BackgroundWorker) runEventLoops(t time.Time) {
 	// wait until all are complete
 	wg.Wait()
 
-	logMetrics(w.loggerOutput, "worker_execution", 1, time.Since(t).Seconds())
+	logMetrics(p.LoggerOutput, "worker_execution", 1, time.Since(p.Started).Seconds())
+
 }
 
 func readRoutinesFromDB(db *sql.DB, group uint, errceiling time.Duration) ([]models.EventzSubscriber, error) {
@@ -440,7 +475,7 @@ func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 	return nil
 }
 
-func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzSubscriber, e error, eventid string, res subscribers.Result) {
+func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzSubscriber, e error, status int, eventid string, res subscribers.Result) {
 
 	stmt, err := dbRW.Prepare(`INSERT INTO eventz_subscriber_error_logs
 (event_id,routine_name,routine_version,routine_instance,error_code,error_message,status,refer_entity,refer_id,created_at)
@@ -456,13 +491,11 @@ VALUES(?,?,?,?,?,?,?,?,?,NOW(6));`)
 			return
 		}
 	}()
-	var code int
 	var cause error
-	if he, ok := e.(*echo.HTTPError); ok {
-		code = he.Code
-		cause = he.Internal
+	if ec, ok := e.(ErrorWithCause); ok {
+		cause = ec.Cause()
 	}
-	_, err = stmt.Exec(eventid, sub.Name, sub.Version, sub.Instance, code, fmt.Sprintf("Error: %v \nCause: %v", e, cause), res.Status(), res.ReferEntity(), res.ReferID())
+	_, err = stmt.Exec(eventid, sub.Name, sub.Version, sub.Instance, status, fmt.Sprintf("Error: %v \nCause: %v", e, cause), res.Status(), res.ReferEntity(), res.ReferID())
 	if err != nil {
 		logError(loggerOutput, err)
 		return
@@ -615,13 +648,11 @@ func markSubscriberEventAsOnHold(dbRW *sql.DB, eventid string) error {
 }
 
 func logError(logto io.Writer, err error) {
-	var status int
 	var cause error
-	if he, ok := err.(*echo.HTTPError); ok {
-		status = he.Code
-		cause = he.Internal
+	if ec, ok := err.(ErrorWithCause); ok {
+		cause = ec.Cause()
 	}
-	msg := fmt.Sprintf("[ERROR] %d %s", status, err.Error())
+	msg := fmt.Sprintf("[ERROR] %s", err.Error())
 	if cause != nil {
 		msg = msg + fmt.Sprintf(" [CAUSE] %v", cause)
 	}

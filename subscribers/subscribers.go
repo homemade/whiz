@@ -20,11 +20,10 @@ type APIMetrics interface {
 }
 
 type Routine interface {
-	IsTemporaryError(err error) (is bool, status int)
 	EventSources() []string
 	EventLoopCeiling() int
 	ProcessEvent(event Event) (Result, error)
-	IsSkippableError(err error) bool
+	AssertError(err error) (temporary bool, skippable bool, status int)
 }
 
 type Event interface {
