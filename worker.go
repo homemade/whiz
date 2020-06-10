@@ -14,38 +14,12 @@ import (
 )
 
 type BackgroundWorkerStatus struct {
-	apiStats        *sync.Map
 	Started         time.Time
 	PollingInterval time.Duration
 	LastPolled      time.Time
 	LastRun         time.Time
-}
-
-type BackgroundWorkerMetrics struct {
-	API map[string]interface{}
-}
-
-func (s *BackgroundWorkerStatus) APIRequestResponse(requestURL string, responseStatusCode int) {
-	var count int
-	key := fmt.Sprintf("%d", responseStatusCode)
-	v, ok := s.apiStats.Load(key)
-	if ok {
-		count = v.(int)
-	}
-	count = count + 1
-	s.apiStats.Store(key, count)
-}
-
-func (s BackgroundWorkerStatus) Metrics() BackgroundWorkerMetrics {
-	// gather metrics
-	apiMetrics := make(map[string]interface{})
-	s.apiStats.Range(func(k interface{}, v interface{}) bool {
-		apiMetrics[k.(string)] = v
-		return true
-	})
-	return BackgroundWorkerMetrics{
-		API: apiMetrics,
-	}
+	DBRW            string
+	DBRO            string
 }
 
 type SubscriberEvents []models.Eventz
@@ -84,7 +58,6 @@ type eventLoopParams struct {
 	LoggerOutput io.Writer
 	LockName     string
 	ErrorCeiling time.Duration
-	Metrics      subscribers.APIMetrics
 	Cancelled    cancelledFunc
 	Registry     subscribers.Registry
 }
@@ -121,7 +94,7 @@ func NewBackgroundWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io
 		errorCeiling:    errorCeiling,
 		mu:              &sync.Mutex{},
 		status: &BackgroundWorkerStatus{
-			apiStats: &sync.Map{},
+			DBRW: fmt.Sprintf("%T", dbRW.Driver()),
 		},
 	}
 	for _, option := range options {
@@ -158,6 +131,7 @@ func ErrorCeiling(t time.Duration) func(*BackgroundWorker) error {
 func ReadOnlyDatabase(dbRO *sql.DB) func(*BackgroundWorker) error {
 	return func(w *BackgroundWorker) error {
 		w.dbRO = dbRO
+		w.status.DBRO = fmt.Sprintf("%T", dbRO.Driver())
 		return nil
 	}
 }
@@ -239,7 +213,6 @@ func (w *BackgroundWorker) nextRun(t time.Time) {
 		LoggerOutput: w.loggerOutput,
 		LockName:     w.lockName,
 		ErrorCeiling: w.errorCeiling,
-		Metrics:      w.status,
 		Cancelled: cancelledFunc(func() bool {
 			return w.shutdown
 		}),
@@ -265,31 +238,31 @@ func runEventLoops(p eventLoopParams) {
 
 	// NOTE: use read only db where at all possible in the worker (this frees up the read write db for the web server)
 
-	// we also need to handle long running processes again to ensure only 1 worker is ever running
-	// we utilise MySQL locks for this
+	// we also need to handle long running processes again to ensure only 1 process is ever running
+	// we use a simple database table for this
 	var err error
-	var lockTran *sql.Tx // we need to keep a handle on the transaction that opens the lock so we can release it later
-	lockTran, err = p.DBRO.Begin()
-	var locked int
-	if err = lockTran.QueryRow(fmt.Sprintf("SELECT GET_LOCK('%s',1);", p.LockName)).Scan(&locked); err != nil {
-		logError(p.LoggerOutput, errWithCause{"failed to acquire worker lock", err})
-		return
+	var locked int64
+	var result sql.Result
+	if result, err = p.DBRW.Exec("INSERT INTO eventz_locks (name,created_at) VALUES(?,NOW(6));", p.LockName); err == nil {
+		locked, err = result.RowsAffected()
 	}
-	if locked != 1 { // failed to acquire lock - another process is still running so just return
-		logInfo(p.LoggerOutput, "next run cancelled as detected another process is still running")
+	if err == nil && locked != 1 {
+		err = fmt.Errorf("%d locks inserted for %s", locked, p.LockName)
+	}
+	if err != nil { // failed to acquire lock - another process is still running so just return
+		logInfo(p.LoggerOutput, fmt.Sprintf("next event loops run cancelled as detected another process is running with lock %s, detected with %v", p.LockName, err))
 		return
 	}
 	defer func() {
-		var unlocked int
-		if err = lockTran.QueryRow(fmt.Sprintf("SELECT RELEASE_LOCK('%s');", p.LockName)).Scan(&unlocked); err != nil {
-			logError(p.LoggerOutput, errWithCause{"failed to release worker lock during clean exit", err})
-		} else {
-			if unlocked != 1 {
-				logError(p.LoggerOutput, errors.New("failed to release worker lock during clean exit"))
-			}
+		var unlocked int64
+		if result, err = p.DBRW.Exec("DELETE FROM eventz_locks WHERE name = ?;", p.LockName); err == nil {
+			unlocked, err = result.RowsAffected()
 		}
-		if err = lockTran.Commit(); err != nil {
-			logError(p.LoggerOutput, errWithCause{"failed to commit worker lock during clean exit", err})
+		if err == nil && unlocked != 1 {
+			err = fmt.Errorf("%d locks deleted for %s", unlocked, p.LockName)
+		}
+		if err != nil {
+			logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to release event loops lock %s during clean exit", p.LockName), err})
 		}
 		return
 	}()
@@ -330,7 +303,7 @@ func runEventLoops(p eventLoopParams) {
 					Version:  r.Version,
 					Instance: r.Instance,
 					MetaData: r.MetaData,
-				}, p.Metrics)
+				})
 				if err != nil {
 					logError(p.LoggerOutput, errWithCause{"failed to load subscriber routine", err})
 					return

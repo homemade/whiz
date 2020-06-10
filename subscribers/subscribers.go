@@ -12,11 +12,7 @@ type Definition struct {
 }
 
 type Registry interface {
-	LoadRoutine(definition Definition, apimetrics APIMetrics) (Routine, error)
-}
-
-type APIMetrics interface {
-	APIRequestResponse(requestURL string, responseStatusCode int)
+	LoadRoutine(definition Definition) (Routine, error)
 }
 
 type Routine interface {
