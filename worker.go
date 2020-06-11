@@ -216,6 +216,7 @@ func (w *BackgroundWorker) nextRun(t time.Time) {
 		Cancelled: cancelledFunc(func() bool {
 			return w.shutdown
 		}),
+		Registry: w.reg,
 	})
 }
 
