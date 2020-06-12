@@ -10,22 +10,23 @@ type Eventz struct {
 	UpdatedAt time.Time
 	DeletedAt *time.Time
 
-	EventID        string
-	EventCreatedAt time.Time
-	EventSource    string
-	EventUUID      string
-	Model          string
-	Type           string
-	Action         string
-	UserID         string
-	ModelData      string
-	SourceData     string
-	SubGrp1Status  uint
-	SubGrp2Status  uint
-	SubGrp3Status  uint
-	SubGrp4Status  uint
-	SubGrp5Status  uint
-	OnHold         uint
+	EventID           string
+	EventCreatedAt    time.Time
+	EventSource       string
+	EventSourceConfig string
+	EventUUID         string
+	Model             string
+	Type              string
+	Action            string
+	UserID            string
+	ModelData         string
+	SourceData        string
+	SubGrp1Status     uint
+	SubGrp2Status     uint
+	SubGrp3Status     uint
+	SubGrp4Status     uint
+	SubGrp5Status     uint
+	OnHold            uint
 
 	ErrorCount uint
 }
@@ -37,6 +38,10 @@ func (Eventz) TableName() string {
 
 func (e Eventz) GetEventSource() string {
 	return e.EventSource
+}
+
+func (e Eventz) GetEventSourceConfig() string {
+	return e.EventSourceConfig
 }
 
 func (e Eventz) GetEventID() string {

@@ -268,6 +268,15 @@ func runEventLoops(p eventLoopParams) {
 		return
 	}()
 
+	// load event sources
+	// we do this on each run to pickup any changes
+	var eventSources map[string]models.EventzSource
+	eventSources, err = readEventSourcesFromDB(p.DBRO)
+	if err != nil {
+		logError(p.LoggerOutput, errWithCause{"failed to read event sources %v", err})
+		return
+	}
+
 	// run all the subscriber event loops
 	z := 5                // (we have up to 5 groups of subscribers)
 	var wg sync.WaitGroup // and a wait group so we know when they have all completed
@@ -328,6 +337,10 @@ func runEventLoops(p eventLoopParams) {
 						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d exiting event loop due to cancellation request", grp))
 						break
 					}
+					// add any event source config
+					if eventSource, exists := eventSources[e.EventSource]; exists {
+						e.EventSourceConfig = eventSource.Config
+					}
 					var procResult subscribers.Result
 					procResult, err = sr.ProcessEvent(e)
 					if err != nil {
@@ -381,12 +394,35 @@ func runEventLoops(p eventLoopParams) {
 
 }
 
+func readEventSourcesFromDB(db *sql.DB) (map[string]models.EventzSource, error) {
+	result := make(map[string]models.EventzSource)
+	var (
+		name   string
+		config string
+	)
+	rows, err := db.Query("SELECT name, config FROM eventz_sources;")
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		err := rows.Scan(&name, &config)
+		if err != nil {
+			return result, err
+		}
+		result[name] = models.EventzSource{
+			Name:   name,
+			Config: config,
+		}
+	}
+	return result, nil
+}
+
 func readRoutinesFromDB(db *sql.DB, group uint, errceiling time.Duration) ([]models.EventzSubscriber, error) {
-	routinesSQL := fmt.Sprintf("select name, version, instance, meta_data, priority from eventz_subscribers where `group` = %d and "+
-		"priority > 0 and `group` in (select `group` from eventz_subscribers group by `group` "+
-		"having MAX(last_error_at) is null or MAX(last_error_at) < DATE_SUB(NOW(6),INTERVAL %f SECOND)) "+
-		"order by priority asc", group, errceiling.Seconds())
-	fmt.Println(routinesSQL)
+	routinesSQL := fmt.Sprintf("SELECT name, version, instance, meta_data, priority FROM eventz_subscribers WHERE `group` = %d AND "+
+		"priority > 0 AND `group` IN (SELECT `group` FROM eventz_subscribers GROUP BY `group` "+
+		"HAVING MAX(last_error_at) IS NULL OR MAX(last_error_at) < DATE_SUB(NOW(6),INTERVAL %f SECOND)) "+
+		"ORDER BY priority ASC;", group, errceiling.Seconds())
 	result := make([]models.EventzSubscriber, 0)
 	var (
 		name      string
@@ -418,7 +454,7 @@ func readRoutinesFromDB(db *sql.DB, group uint, errceiling time.Duration) ([]mod
 }
 
 func updateLastRunAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
-	result, err := dbRW.Exec("update eventz_subscribers set last_run_at = NOW(6) where name = ? and version = ? and instance = ?", sub.Name, sub.Version, sub.Instance)
+	result, err := dbRW.Exec("UPDATE eventz_subscribers SET last_run_at = NOW(6) WHERE name = ? AND version = ? AND instance = ?;", sub.Name, sub.Version, sub.Instance)
 	if err != nil {
 		return err
 	}
@@ -434,7 +470,7 @@ func updateLastRunAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 }
 
 func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
-	result, err := dbRW.Exec("update eventz_subscribers set last_error_at = NOW(6) where name = ? and version = ? and instance = ?", sub.Name, sub.Version, sub.Instance)
+	result, err := dbRW.Exec("UPDATE eventz_subscribers SET last_error_at = NOW(6) WHERE name = ? AND version = ? AND instance = ?;", sub.Name, sub.Version, sub.Instance)
 	if err != nil {
 		return err
 	}
@@ -504,23 +540,23 @@ func readSubscriberEventsFromDB(db *sql.DB, group uint, priority uint, sources [
 		eventSourceData sql.NullString
 	)
 
-	subscriberEventsSQL := fmt.Sprintf(`select event_id, event_created_at, event_source, event_uuid, model, type, action, user_id, model_data, source_data
-from eventz
-where on_hold = 0
-and sub_grp%d_status = (%d - 1)`, group, priority)
+	subscriberEventsSQL := fmt.Sprintf(`SELECT event_id, event_created_at, event_source, event_uuid, model, type, action, user_id, model_data, source_data
+FROM eventz
+WHERE on_hold = 0
+AND sub_grp%d_status = (%d - 1)`, group, priority)
 	// sources can be a wild card
 	if sources[0] == "*" {
 		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(`
-		and event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
-		order by event_created_at,event_id asc`, ceiling)
+		AND event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
+		ORDER BY event_created_at,event_id ASC;`, ceiling)
 	} else { // or a filter
 		eventSources := strings.Join(strings.Fields(fmt.Sprint(sources)), "','")
 		eventSources = strings.Replace(eventSources, "[", "('", 1)
 		eventSources = strings.Replace(eventSources, "]", "')", 1)
 		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(`
-		and event_source in %s
-		and event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
-		order by event_created_at,event_id asc`, eventSources, ceiling)
+		AND event_source IN %s
+		AND event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
+		ORDER BY event_created_at,event_id ASC;`, eventSources, ceiling)
 	}
 	rows, err := db.Query(subscriberEventsSQL)
 	if err != nil {
@@ -568,7 +604,7 @@ and sub_grp%d_status = (%d - 1)`, group, priority)
 }
 
 func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, event models.Eventz, res subscribers.Result) error {
-	stmt := fmt.Sprintf("update eventz set sub_grp%d_status = ? where event_id = ?;", sub.Group)
+	stmt := fmt.Sprintf("UPDATE eventz SET sub_grp%d_status = ? WHERE event_id = ?;", sub.Group)
 	result, err := dbRW.Exec(stmt, sub.Priority, event.EventID)
 	if err != nil {
 		return err
@@ -605,7 +641,7 @@ func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, e
 }
 
 func markSubscriberEventAsOnHold(dbRW *sql.DB, eventid string) error {
-	stmt := "update eventz set on_hold = 1 where event_id = ?;"
+	stmt := "UPDATE eventz SET on_hold = 1 WHERE event_id = ?;"
 	result, err := dbRW.Exec(stmt, eventid)
 	if err != nil {
 		return err

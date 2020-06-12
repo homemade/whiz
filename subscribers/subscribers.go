@@ -26,6 +26,7 @@ type Event interface {
 	GetEventID() string
 	GetEventCreatedAt() time.Time
 	GetEventSource() string
+	GetEventSourceConfig() string
 	GetEventUUID() string
 	GetModelData() string
 	GetSourceData() string
