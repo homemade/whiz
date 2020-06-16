@@ -1,19 +1,16 @@
 package raisely
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/homemade/whiz/publishers"
 )
-
-type WebhookPublisher struct {
-	DB *sql.DB
-}
 
 type raisleyRequest struct {
 	Secret string `json:"secret"`
@@ -26,41 +23,17 @@ type raisleyRequest struct {
 	} `json:"data"`
 }
 
-func (p WebhookPublisher) Path() string {
-	return "raisely"
-}
-
-func (p WebhookPublisher) Receive(request publishers.Request, response publishers.Response, logger publishers.Logger) (status int, err error) {
-
-	var hook *publishers.Hook
-	hook, err = ParseRaisleyRequest(request)
+func Parser(r *http.Request, secret string) (hook *publishers.Hook, err error) {
+	var body []byte
+	if r.Body != nil {
+		body, err = ioutil.ReadAll(r.Body)
+	}
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("failed to parse request `%s` from path %s %v", request.BodyUnicode, request.Path, err)
-	}
-	if hook == nil { // handle requests that do not require an insert e.g. initial raisely webhook validation
-		status = http.StatusAccepted
-		err = response.String(status, "")
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
-		return status, nil
+		return nil, err
 	}
 
-	err = publishers.Save(p.DB, *hook)
-	if err != nil {
-		return http.StatusInternalServerError, err
-	}
-
-	status = http.StatusAccepted
-	err = response.String(status, "")
-	if err != nil {
-		return http.StatusInternalServerError, err
-	}
-	return status, nil
-}
-
-func ParseRaisleyRequest(r publishers.Request) (hook *publishers.Hook, err error) {
-	if len(r.Body) < 3 {
+	r.Body.Close()
+	if len(body) < 3 {
 		return nil, nil // handle initial empty request from raisely of `{}` - used to validate webhook
 	}
 	// required fields
@@ -69,10 +42,17 @@ func ParseRaisleyRequest(r publishers.Request) (hook *publishers.Hook, err error
 		return nil, fmt.Errorf("failed to parse source_data %v", err)
 	}
 	var rr raisleyRequest
-	err = json.Unmarshal(r.Body, &rr)
+	err = json.Unmarshal(body, &rr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse request %v", err)
 	}
+
+	if secret != "" {
+		if secret != rr.Secret {
+			return nil, errors.New("invalid secret")
+		}
+	}
+
 	event_id := fmt.Sprintf("raisely_webhook:%s", rr.Event.UUID)
 	var event_created_at time.Time
 	event_created_at, err = time.Parse(time.RFC3339, rr.Event.CreatedAt)
