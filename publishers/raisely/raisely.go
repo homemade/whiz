@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"strings"
 	"time"
 
@@ -23,26 +21,14 @@ type raisleyRequest struct {
 	} `json:"data"`
 }
 
-func Parser(r *http.Request, secret string) (hook *publishers.Hook, err error) {
-	var body []byte
-	if r.Body != nil {
-		body, err = ioutil.ReadAll(r.Body)
-	}
-	if err != nil {
-		return nil, err
-	}
+func Parser(request publishers.WebhookRequest, secret string) (hook *publishers.Hook, err error) {
 
-	r.Body.Close()
-	if len(body) < 3 {
+	if len(request.Body) < 3 {
 		return nil, nil // handle initial empty request from raisely of `{}` - used to validate webhook
 	}
-	// required fields
-	source_data, err := json.Marshal(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse source_data %v", err)
-	}
+
 	var rr raisleyRequest
-	err = json.Unmarshal(body, &rr)
+	err = json.Unmarshal(request.Body, &rr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse request %v", err)
 	}
@@ -53,14 +39,14 @@ func Parser(r *http.Request, secret string) (hook *publishers.Hook, err error) {
 		}
 	}
 
-	event_id := fmt.Sprintf("raisely_webhook:%s", rr.Event.UUID)
-	var event_created_at time.Time
-	event_created_at, err = time.Parse(time.RFC3339, rr.Event.CreatedAt)
+	eventID := fmt.Sprintf("raisely_webhook:%s", rr.Event.UUID)
+	var eventCreatedAt time.Time
+	eventCreatedAt, err = time.Parse(time.RFC3339, rr.Event.CreatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse event_created_at %v", err)
+		return nil, fmt.Errorf("failed to parse EventCreatedAt %v", err)
 	}
-	event_source := rr.Event.Source
-	event_uuid := rr.Event.UUID
+	eventSource := rr.Event.Source
+	eventUUID := rr.Event.UUID
 
 	parts := strings.Split(rr.Event.Type, ".")
 	if len(parts) != 2 {
@@ -69,8 +55,8 @@ func Parser(r *http.Request, secret string) (hook *publishers.Hook, err error) {
 	model := parts[0]
 	action := parts[1]
 	// set type and user id as appropriate for the model
-	typ := "N/A"     // default
-	user_id := "N/A" // default
+	typ := "N/A"    // default
+	userID := "N/A" // default
 	if m, ok := rr.Event.Data.(map[string]interface{}); ok {
 		// first set type
 		field := "type"      // for most models we look for the type field
@@ -89,28 +75,32 @@ func Parser(r *http.Request, secret string) (hook *publishers.Hook, err error) {
 		}
 		if u, exists := m[field]; exists {
 			if s, uok := u.(string); uok {
-				user_id = s
+				userID = s
 			}
 		}
 	}
-	var model_data []byte
-	model_data, err = json.Marshal(rr.Event.Data)
+
+	var sourceData []byte
+	sourceData, err = json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse model_data %v", err)
+		return nil, fmt.Errorf("failed to parse SourceData %v", err)
 	}
-	md := string(model_data)
-	sd := string(source_data)
+	var modelData []byte
+	modelData, err = json.Marshal(rr.Event.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ModelData %v", err)
+	}
 
 	return &publishers.Hook{
-		EventID:        event_id,
-		EventCreatedAt: event_created_at,
-		EventSource:    event_source,
-		EventUUID:      event_uuid,
+		EventID:        eventID,
+		EventCreatedAt: eventCreatedAt,
+		EventSource:    eventSource,
+		EventUUID:      eventUUID,
 		Model:          model,
 		Type:           typ,
 		Action:         action,
-		UserID:         user_id,
-		ModelData:      md,
-		SourceData:     sd,
+		UserID:         userID,
+		ModelData:      string(modelData),
+		SourceData:     string(sourceData),
 	}, nil
 }
