@@ -13,7 +13,7 @@ import (
 	"github.com/homemade/whiz/subscribers"
 )
 
-type BackgroundWorkerStatus struct {
+type WorkerStatus struct {
 	Started         time.Time
 	PollingInterval time.Duration
 	LastPolled      time.Time
@@ -34,18 +34,19 @@ func (se SubscriberEvents) Less(i, j int) bool {
 	return se[j].EventCreatedAt.After(se[i].EventCreatedAt)
 }
 
-type BackgroundWorker struct {
+type Worker struct {
 	dbRW            *sql.DB
 	dbRO            *sql.DB
 	reg             subscribers.Registry
 	loggerOutput    io.Writer
 	lockName        string
 	pollingInterval time.Duration
+	externalPolling bool
 	errorCeiling    time.Duration
 	tick            *time.Ticker
 	mu              *sync.Mutex
 	active          bool
-	status          *BackgroundWorkerStatus
+	status          *WorkerStatus
 	shutdown        bool
 }
 
@@ -80,11 +81,11 @@ func (e errWithCause) Cause() error {
 	return e.cause
 }
 
-func NewBackgroundWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io.Writer, options ...func(*BackgroundWorker) error) (*BackgroundWorker, error) {
+func NewWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io.Writer, options ...func(*Worker) error) (*Worker, error) {
 	lockName := "whiz-worker"          // default
 	pollingInterval := 1 * time.Minute // default
 	errorCeiling := 1 * time.Minute    // default
-	w := BackgroundWorker{
+	w := Worker{
 		dbRW:            dbRW,
 		dbRO:            dbRW, // default
 		reg:             reg,
@@ -93,7 +94,7 @@ func NewBackgroundWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io
 		pollingInterval: pollingInterval,
 		errorCeiling:    errorCeiling,
 		mu:              &sync.Mutex{},
-		status: &BackgroundWorkerStatus{
+		status: &WorkerStatus{
 			DBRW: fmt.Sprintf("%T", dbRW.Driver()),
 		},
 	}
@@ -106,41 +107,48 @@ func NewBackgroundWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io
 	return &w, nil
 }
 
-func LockName(s string) func(*BackgroundWorker) error {
-	return func(w *BackgroundWorker) error {
+func LockName(s string) func(*Worker) error {
+	return func(w *Worker) error {
 		w.lockName = s
 		return nil
 	}
 }
 
-func PollingInterval(t time.Duration) func(*BackgroundWorker) error {
-	return func(w *BackgroundWorker) error {
+func PollingInterval(t time.Duration) func(*Worker) error {
+	return func(w *Worker) error {
 		w.pollingInterval = t
 		return nil
 	}
 }
 
-func ErrorCeiling(t time.Duration) func(*BackgroundWorker) error {
-	return func(w *BackgroundWorker) error {
+func ExternalPolling() func(*Worker) error {
+	return func(w *Worker) error {
+		w.externalPolling = true
+		return nil
+	}
+}
+
+func ErrorCeiling(t time.Duration) func(*Worker) error {
+	return func(w *Worker) error {
 		w.errorCeiling = t
 		return nil
 	}
 }
 
 // option for providing a read replica
-func ReadOnlyDatabase(dbRO *sql.DB) func(*BackgroundWorker) error {
-	return func(w *BackgroundWorker) error {
+func ReadOnlyDatabase(dbRO *sql.DB) func(*Worker) error {
+	return func(w *Worker) error {
 		w.dbRO = dbRO
 		w.status.DBRO = fmt.Sprintf("%T", dbRO.Driver())
 		return nil
 	}
 }
 
-func (w *BackgroundWorker) pollingLoop(i int) {
+func (w *Worker) pollingLoop(i int) {
 	for t := range w.tick.C {
 		w.status.LastPolled = t
 		if w.active {
-			logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker cancelled next poll as previous run still active %v", w.status))
+			logInfo(w.loggerOutput, fmt.Sprintf("Worker cancelled next poll as previous run still active %v", w.status))
 			continue // handle runs that take longer than the event loop polling interval
 		}
 		w.status.LastRun = t
@@ -148,7 +156,7 @@ func (w *BackgroundWorker) pollingLoop(i int) {
 		w.nextRun(t)
 		// handle changes to polling interval whilst running
 		if w.pollingInterval != w.status.PollingInterval {
-			logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker restarting polling as interval has changed from %v to %v", w.status.PollingInterval, w.pollingInterval))
+			logInfo(w.loggerOutput, fmt.Sprintf("Worker restarting polling as interval has changed from %v to %v", w.status.PollingInterval, w.pollingInterval))
 			w.tick.Stop()
 			w.tick = time.NewTicker(w.pollingInterval)
 			w.status.PollingInterval = w.pollingInterval
@@ -157,10 +165,14 @@ func (w *BackgroundWorker) pollingLoop(i int) {
 	}
 }
 
-func (w *BackgroundWorker) StartPolling() {
+func (w *Worker) StartPolling() {
+	if w.externalPolling {
+		logError(w.loggerOutput, errors.New("Worker has been configured to use external polling, call PollNow() to trigger next run"))
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			logError(w.loggerOutput, fmt.Errorf("BackgroundWorker returned from call to start polling with error %v", r))
+			logError(w.loggerOutput, fmt.Errorf("Worker returned from call to start polling with error %v", r))
 		}
 	}()
 	w.status.Started = time.Now()
@@ -170,20 +182,19 @@ func (w *BackgroundWorker) StartPolling() {
 		i := 0
 		w.pollingLoop(i)
 	}()
-	logInfo(w.loggerOutput, "BackgroundWorker started polling")
-
+	logInfo(w.loggerOutput, "Worker started polling")
 }
 
-func (w *BackgroundWorker) PollNow() {
+func (w *Worker) PollNow() {
 	defer func() {
 		if r := recover(); r != nil {
-			logError(w.loggerOutput, fmt.Errorf("BackgroundWorker returned from call to poll now with error %v", r))
+			logError(w.loggerOutput, fmt.Errorf("Worker returned from call to poll now with error %v", r))
 		}
 	}()
 	t := time.Now()
 	w.status.LastPolled = t
 	if w.active {
-		logInfo(w.loggerOutput, fmt.Sprintf("BackgroundWorker cancelled poll now request as previous run still active %v", w.status))
+		logInfo(w.loggerOutput, fmt.Sprintf("Worker cancelled poll now request as previous run still active %v", w.status))
 		return // already polling
 	}
 	w.status.LastRun = t
@@ -191,17 +202,17 @@ func (w *BackgroundWorker) PollNow() {
 	w.nextRun(t)
 }
 
-func (w BackgroundWorker) Status() BackgroundWorkerStatus {
+func (w Worker) Status() WorkerStatus {
 	return *w.status
 }
 
-func (w *BackgroundWorker) nextRun(t time.Time) {
+func (w *Worker) nextRun(t time.Time) {
 	// ensure only one background worker can run at a time using an in memory check
 	// we also use a database lock in case we accidently have multiple instances deployed see runEventLoops()
 	w.mu.Lock()
 	w.active = true
 	w.mu.Unlock()
-	defer func(wrk *BackgroundWorker) {
+	defer func(wrk *Worker) {
 		wrk.mu.Lock()
 		wrk.active = false
 		wrk.mu.Unlock()
@@ -220,10 +231,10 @@ func (w *BackgroundWorker) nextRun(t time.Time) {
 	})
 }
 
-func (w *BackgroundWorker) Shutdown() {
+func (w *Worker) Shutdown() {
 	defer func() {
 		if r := recover(); r != nil {
-			logError(w.loggerOutput, fmt.Errorf("BackgroundWorker returned from call to shutdown with error %v", r))
+			logError(w.loggerOutput, fmt.Errorf("Worker returned from call to shutdown with error %v", r))
 		}
 	}()
 	if w.tick != nil {
@@ -289,12 +300,12 @@ func runEventLoops(p eventLoopParams) {
 			defer func() {
 				wg.Done()
 				if err != nil {
-					logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with error %v", grp, err))
+					logInfo(p.LoggerOutput, fmt.Sprintf("Worker subscriber group %d done with error %v", grp, err))
 				} else {
 					if r := recover(); r != nil {
-						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done with unhandled error %v", grp, r))
+						logInfo(p.LoggerOutput, fmt.Sprintf("Worker subscriber group %d done with unhandled error %v", grp, r))
 					} else {
-						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d done", grp))
+						logInfo(p.LoggerOutput, fmt.Sprintf("Worker subscriber group %d done", grp))
 					}
 				}
 			}()
@@ -334,7 +345,7 @@ func runEventLoops(p eventLoopParams) {
 				for _, e := range events {
 					// handle cancellation requests
 					if p.Cancelled() {
-						logInfo(p.LoggerOutput, fmt.Sprintf("BackgroundWorker subscriber group %d exiting event loop due to cancellation request", grp))
+						logInfo(p.LoggerOutput, fmt.Sprintf("Worker subscriber group %d exiting event loop due to cancellation request", grp))
 						break
 					}
 					// add any event source config
