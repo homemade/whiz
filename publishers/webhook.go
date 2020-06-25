@@ -7,11 +7,21 @@ import (
 	"net/http"
 )
 
-type Parser func(request WebhookRequest, secret string) (hook *Hook, err error)
+type Parser interface {
+	Parse(request WebhookRequest, secret string) (hook *Hook, err error)
+}
+
+// The ParserFunc type is an adapter to allow the use of ordinary functions as Parsers.
+// If f is a function with the appropriate signature, ParserFunc(f) is a Parser that returns f(request, secret).
+type ParserFunc func(request WebhookRequest, secret string) (hook *Hook, err error)
+
+// Parse returns f(request, secret).
+func (f ParserFunc) Parse(request WebhookRequest, secret string) (hook *Hook, err error) {
+	return f(request, secret)
+}
 
 type WebhookPublisher struct {
 	DB             *sql.DB
-	Path           string
 	Secret         string
 	Parser         Parser
 	AcceptedStatus int
@@ -46,7 +56,7 @@ func (p WebhookPublisher) Receive(w http.ResponseWriter, r *http.Request) (statu
 	r.Body.Close()
 
 	var hook *Hook
-	hook, err = p.Parser(WebhookRequest{
+	hook, err = p.Parser.Parse(WebhookRequest{
 		Path:                  path,
 		HTTPMethod:            r.Method,
 		Headers:               r.Header,

@@ -9,6 +9,10 @@ import (
 	"github.com/segmentio/ksuid"
 )
 
+type Parser struct {
+	Source string
+}
+
 type autopilotRequest struct {
 	Event     string      `json:"event"`
 	ContactID string      `json:"contact_id"`
@@ -17,68 +21,7 @@ type autopilotRequest struct {
 	Contact   interface{} `json:"contact"`
 }
 
-// {
-// 	"event": "contact_added",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// 	"event": "contact_updated",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// {
-// 	"event": "contact_unsubscribed",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// {
-// 	"event": "contact_added_to_list",
-// 	"list_id": "XXX",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// {
-// 	"event": "contact_removed_from_list",
-// 	"list_id": "XXX",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// {
-// 	"event": "contact_entered_segment",
-// 	"segment_id": "XXX",
-// 	"list_id": "XXX",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-// {
-// 	"event": "contact_left_segment",
-// 	"segment_id": "XXX",
-// 	"list_id": "XXX",
-// 	"contact_id": "XXX",
-// 	"contact": {
-// 		...
-// 	}
-// }
-
-func Parser(request publishers.WebhookRequest, secret string) (hook *publishers.Hook, err error) {
+func (p Parser) Parse(request publishers.WebhookRequest, secret string) (hook *publishers.Hook, err error) {
 
 	var ar autopilotRequest
 	err = json.Unmarshal(request.Body, &ar)
@@ -86,18 +29,50 @@ func Parser(request publishers.WebhookRequest, secret string) (hook *publishers.
 		return nil, fmt.Errorf("failed to parse request %v", err)
 	}
 
-	// generate some ids (autopilot does not provide any)
+	// generate some Event ids (autopilot does not provide any)
 	eventUUID := ksuid.New().String()
 	eventID := fmt.Sprintf("autopilot_webhook:%s", eventUUID)
 	// and a timestamp
 	eventCreatedAt := time.Now()
 
-	// TODO investigate how we can extract meaningful information for these values
-	eventSource := "N/A" // default
-	model := "N/A"       // default
-	action := "N/A"      // default
-	typ := "N/A"         // default
-	userID := "N/A"      // default
+	eventSource := p.Source
+	// map the ContactID to UserID
+	userID := ar.ContactID
+
+	// populate Model, Type and Action based on the Autopilot event
+	var model, action, typ string
+	switch ar.Event {
+	case "contact_added":
+		model = "contact"
+		action = "added"
+		typ = ar.ContactID
+	case "contact_updated":
+		model = "contact"
+		action = "updated"
+		typ = ar.ContactID
+	case "contact_unsubscribed":
+		model = "contact"
+		action = "unsubscribed"
+		typ = ar.ContactID
+	case "contact_added_to_list":
+		model = "list"
+		action = "added"
+		typ = ar.ListID
+	case "contact_removed_from_list":
+		model = "list"
+		action = "removed"
+		typ = ar.ListID
+	case "contact_entered_segment":
+		model = "segment"
+		action = "entered"
+		typ = ar.SegmentID
+	case "contact_left_segment":
+		model = "segment"
+		action = "left"
+		typ = ar.SegmentID
+	default:
+		return nil, fmt.Errorf("unsupported autopilot event %s", ar.Event)
+	}
 
 	var sourceData []byte
 	sourceData, err = json.Marshal(request)

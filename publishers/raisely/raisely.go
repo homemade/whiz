@@ -21,7 +21,7 @@ type raisleyRequest struct {
 	} `json:"data"`
 }
 
-func Parser(request publishers.WebhookRequest, secret string) (hook *publishers.Hook, err error) {
+func Parse(request publishers.WebhookRequest, secret string) (hook *publishers.Hook, err error) {
 
 	if len(request.Body) < 3 {
 		return nil, nil // handle initial empty request from raisely of `{}` - used to validate webhook
