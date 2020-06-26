@@ -29,47 +29,47 @@ func (p Parser) Parse(request publishers.WebhookRequest, secret string) (hook *p
 		return nil, fmt.Errorf("failed to parse request %v", err)
 	}
 
-	// generate some Event ids (autopilot does not provide any)
-	eventUUID := ksuid.New().String()
-	eventID := fmt.Sprintf("autopilot_webhook:%s", eventUUID)
+	// generate Event ID (autopilot does not provide one)
+	eventID := fmt.Sprintf("autopilot_webhook:%s", ksuid.New().String())
 	// and a timestamp
 	eventCreatedAt := time.Now()
 
 	eventSource := p.Source
+
 	// map the ContactID to UserID
 	userID := ar.ContactID
 
-	// populate Model, Type and Action based on the Autopilot event
-	var model, action, typ string
+	// populate Model, EventUUID and Action based on the autopilot event
+	var model, eventUUID, action string
 	switch ar.Event {
 	case "contact_added":
 		model = "contact"
+		eventUUID = ar.ContactID
 		action = "added"
-		typ = ar.ContactID
 	case "contact_updated":
 		model = "contact"
+		eventUUID = ar.ContactID
 		action = "updated"
-		typ = ar.ContactID
 	case "contact_unsubscribed":
 		model = "contact"
+		eventUUID = ar.ContactID
 		action = "unsubscribed"
-		typ = ar.ContactID
 	case "contact_added_to_list":
 		model = "list"
+		eventUUID = ar.ListID
 		action = "added"
-		typ = ar.ListID
 	case "contact_removed_from_list":
 		model = "list"
+		eventUUID = ar.ListID
 		action = "removed"
-		typ = ar.ListID
 	case "contact_entered_segment":
 		model = "segment"
+		eventUUID = ar.SegmentID
 		action = "entered"
-		typ = ar.SegmentID
 	case "contact_left_segment":
 		model = "segment"
+		eventUUID = ar.SegmentID
 		action = "left"
-		typ = ar.SegmentID
 	default:
 		return nil, fmt.Errorf("unsupported autopilot event %s", ar.Event)
 	}
@@ -91,7 +91,7 @@ func (p Parser) Parse(request publishers.WebhookRequest, secret string) (hook *p
 		EventSource:    eventSource,
 		EventUUID:      eventUUID,
 		Model:          model,
-		Type:           typ,
+		Type:           "", // not required for autopilot
 		Action:         action,
 		UserID:         userID,
 		ModelData:      string(modelData),
