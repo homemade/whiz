@@ -202,6 +202,27 @@ func (w *Worker) PollNow() {
 	w.nextRun(t)
 }
 
+func (w *Worker) ReProcessSubscriberEvent(eventid string, timeout int) {
+	t := time.Now()
+	// wait until previous polling is no longer active or timeout hit
+	for w.active && time.Now().Before(t.Add(time.Second*time.Duration(timeout))) {
+		time.Sleep(500 * time.Millisecond)
+	}
+	if w.active {
+		logInfo(w.loggerOutput, fmt.Sprintf("Worker cancelled call to reprocess event as previous run still active after %s seconds %v", timeout, w.status))
+		return //timeout
+	}
+	// reset the event
+	err := resetSubscriberEvent(w.dbRW, eventid)
+	if err != nil {
+		logError(w.loggerOutput, errWithCause{fmt.Sprintf("failed to reset on hold record matching Event#%s", eventid), err})
+		return
+	}
+	logInfo(w.loggerOutput, fmt.Sprintf("Worker has reset on hold Event#%s and is making a request to poll now", eventid))
+	// trigger polling
+	w.PollNow()
+}
+
 func (w Worker) Status() WorkerStatus {
 	return *w.status
 }
@@ -653,6 +674,23 @@ func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, e
 
 func markSubscriberEventAsOnHold(dbRW *sql.DB, eventid string) error {
 	stmt := "UPDATE eventz SET on_hold = 1 WHERE event_id = ?;"
+	result, err := dbRW.Exec(stmt, eventid)
+	if err != nil {
+		return err
+	}
+	var rowsAffected int64
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("expected 1 row to be affected but %d were", rowsAffected)
+	}
+	return err
+}
+
+func resetSubscriberEvent(dbRW *sql.DB, eventid string) error {
+	stmt := "UPDATE eventz SET on_hold = 0 WHERE event_id = ? AND on_hold = 1;"
 	result, err := dbRW.Exec(stmt, eventid)
 	if err != nil {
 		return err
