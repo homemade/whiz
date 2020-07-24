@@ -144,7 +144,8 @@ func ReadOnlyDatabase(dbRO *sql.DB) func(*Worker) error {
 	}
 }
 
-func (w *Worker) pollingLoop(i int) {
+func (w *Worker) pollingLoop(count int) {
+	i := count
 	for t := range w.tick.C {
 		w.status.LastPolled = t
 		if w.active {
@@ -152,7 +153,8 @@ func (w *Worker) pollingLoop(i int) {
 			continue // handle runs that take longer than the event loop polling interval
 		}
 		w.status.LastRun = t
-		logMetrics(w.loggerOutput, "worker_poll", i+1, time.Since(w.status.Started).Seconds())
+		i = i + 1
+		logMetrics(w.loggerOutput, "worker_poll", i, time.Since(w.status.Started).Seconds())
 		w.nextRun(t)
 		// handle changes to polling interval whilst running
 		if w.pollingInterval != w.status.PollingInterval {
@@ -179,8 +181,7 @@ func (w *Worker) StartPolling() {
 	w.status.PollingInterval = w.pollingInterval
 	w.tick = time.NewTicker(w.pollingInterval)
 	go func() {
-		i := 0
-		w.pollingLoop(i)
+		w.pollingLoop(0)
 	}()
 	logInfo(w.loggerOutput, "Worker started polling")
 }
