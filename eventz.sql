@@ -58,13 +58,13 @@ CREATE TABLE IF NOT EXISTS `eventz_subscriber_error_logs` (
   `error_message` text,
   `status` varchar(48) NOT NULL,
   `event_id` varchar(48) DEFAULT NULL,
-  `refer_table` varchar(255) DEFAULT NULL,
+  `refer_entity` varchar(255) DEFAULT NULL,
   `refer_id` varchar(255) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_eventz_subscriber_error_logs_updated_at` (`updated_at`),
   KEY `idx_eventz_subscriber_error_logs_deleted_at` (`deleted_at`),
   KEY `idx_eventz_subscriber_error_logs_event_id` (`event_id`),
-  KEY `idx_eventz_subscriber_error_logs_refer_table` (`refer_table`),
+  KEY `idx_eventz_subscriber_error_logs_refer_entity` (`refer_entity`),
   KEY `idx_eventz_subscriber_error_logs_refer_id` (`refer_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=0 DEFAULT CHARSET=latin1;
 CREATE TABLE IF NOT EXISTS `eventz_subscriber_processed_logs` (
@@ -77,14 +77,14 @@ CREATE TABLE IF NOT EXISTS `eventz_subscriber_processed_logs` (
   `routine_version` varchar(48) NOT NULL,
   `routine_instance` varchar(48) NOT NULL,
   `status` varchar(48) NOT NULL,
-  `refer_table` varchar(255) DEFAULT NULL,
+  `refer_entity` varchar(255) DEFAULT NULL,
   `refer_id` varchar(255) DEFAULT NULL,
   `meta_data` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci,
   PRIMARY KEY (`id`),
   KEY `idx_eventz_subscriber_processed_logs_refer_id` (`refer_id`),
   KEY `idx_eventz_subscriber_processed_logs_deleted_at` (`deleted_at`),
   KEY `idx_eventz_subscriber_processed_logs_event_id` (`event_id`),
-  KEY `idx_eventz_subscriber_processed_logs_refer_table` (`refer_table`)
+  KEY `idx_eventz_subscriber_processed_logs_refer_entity` (`refer_entity`)
 ) ENGINE=InnoDB AUTO_INCREMENT=0 DEFAULT CHARSET=latin1;
 CREATE TABLE IF NOT EXISTS `eventz_subscribers` (
   `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
