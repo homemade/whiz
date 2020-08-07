@@ -29,9 +29,6 @@ VALUES(NOW(6),?,?,?,?,?,?,?,?,?,?);`)
 	}
 	defer stmt.Close()
 	_, err = stmt.Exec(hook.EventID, hook.EventCreatedAt, hook.EventSource, hook.EventUUID, hook.Model, hook.Type, hook.Action, hook.UserID, hook.ModelData, hook.SourceData)
-	if err != nil {
-		return fmt.Errorf("failed to execute sql statement when saving hook with event id %s %v", hook.EventID, err)
-	}
-	return nil
+	return err
 
 }

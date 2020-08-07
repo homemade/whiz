@@ -21,10 +21,51 @@ func (f ParserFunc) Parse(request WebhookRequest, secret string) (hook *Hook, er
 }
 
 type WebhookPublisher struct {
-	DB             *sql.DB
-	Secret         string
-	Parser         Parser
-	AcceptedStatus int
+	db               *sql.DB
+	parser           Parser
+	secret           string
+	statusCreated    int
+	statusAccepted   int
+	ignoreDuplicates bool
+	errorAsserts     ErrorAsserts
+}
+
+func NewWebhookPublisher(db *sql.DB, parser Parser, options ...func(*WebhookPublisher)) WebhookPublisher {
+	w := WebhookPublisher{
+		db:             db,
+		parser:         parser,
+		statusCreated:  http.StatusCreated,
+		statusAccepted: http.StatusAccepted,
+	}
+	for _, option := range options {
+		option(&w)
+	}
+	return w
+}
+
+func WebhookPublisherSecret(secret string) func(*WebhookPublisher) {
+	return func(w *WebhookPublisher) {
+		w.secret = secret
+	}
+}
+
+func WebhookPublisherStatusCreated(status int) func(*WebhookPublisher) {
+	return func(w *WebhookPublisher) {
+		w.statusCreated = status
+	}
+}
+
+func WebhookPublisherStatusAccepted(status int) func(*WebhookPublisher) {
+	return func(w *WebhookPublisher) {
+		w.statusAccepted = status
+	}
+}
+
+func WebhookPublisherIgnoreDuplicates(errorAsserts ErrorAsserts) func(*WebhookPublisher) {
+	return func(w *WebhookPublisher) {
+		w.ignoreDuplicates = true
+		w.errorAsserts = errorAsserts
+	}
 }
 
 type WebhookRequest struct {
@@ -56,14 +97,14 @@ func (p WebhookPublisher) Receive(w http.ResponseWriter, r *http.Request) (statu
 	r.Body.Close()
 
 	var hook *Hook
-	hook, err = p.Parser.Parse(WebhookRequest{
+	hook, err = p.parser.Parse(WebhookRequest{
 		Path:                  path,
 		HTTPMethod:            r.Method,
 		Headers:               r.Header,
 		Body:                  body,
 		BodyUnicode:           string(body),
 		QueryStringParameters: query,
-	}, p.Secret)
+	}, p.secret)
 	if err != nil {
 		return http.StatusBadRequest, err
 	}
@@ -79,19 +120,26 @@ func (p WebhookPublisher) Receive(w http.ResponseWriter, r *http.Request) (statu
 	}
 
 	if hook == nil { // handle requests that do not require an insert e.g. initial webhook validation requests
-		err = writeString(p.AcceptedStatus, "")
+		status = p.statusAccepted
+		err = writeString(status, "")
 		if err != nil {
 			return http.StatusInternalServerError, err
 		}
 		return status, nil
 	}
 
-	err = Save(p.DB, *hook)
-	if err != nil {
-		return http.StatusInternalServerError, err
+	err = Save(p.db, *hook)
+	if err == nil {
+		status = p.statusCreated
+	} else {
+		if p.ignoreDuplicates && p.errorAsserts.IsDuplicateDatabaseEntry(err) {
+			status = p.statusAccepted
+		} else {
+			return http.StatusInternalServerError, err
+		}
 	}
 
-	err = writeString(p.AcceptedStatus, "")
+	err = writeString(status, "")
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
