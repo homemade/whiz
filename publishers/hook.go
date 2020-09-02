@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/homemade/whiz/sqlbuilder"
 )
 
 type Hook struct {
@@ -21,20 +23,18 @@ type Hook struct {
 
 func Save(db *sql.DB, hook Hook) error {
 
-	d := fmt.Sprintf("%T", db.Driver())
-
-	s := `INSERT INTO eventz
-(created_at,event_id,event_created_at,event_source,event_uuid,model,type,action,user_id,model_data,source_data)`
-	switch d {
-	case "*mysql.MySQLDriver":
-		s = s + " VALUES(NOW(6),?,?,?,?,?,?,?,?,?,?);"
-	case "*pq.Driver":
-		s = s + " VALUES(NOW(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10);"
-	default:
-		return fmt.Errorf("unsupported database driver %s", d)
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    " VALUES(NOW(6),?,?,?,?,?,?,?,?,?,?);",
+		Postgres: " VALUES(NOW(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10);",
+	}.Switch(db)
+	if err != nil {
+		return err
 	}
+	s = `INSERT INTO eventz
+(created_at,event_id,event_created_at,event_source,event_uuid,model,type,action,user_id,model_data,source_data)` + s
 
-	stmt, err := db.Prepare(s)
+	var stmt *sql.Stmt
+	stmt, err = db.Prepare(s)
 	if err != nil {
 		return fmt.Errorf("failed to prepare sql statement when saving hook with event id %s %v", hook.EventID, err)
 	}

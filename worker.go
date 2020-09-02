@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/homemade/whiz/internal/models"
+	"github.com/homemade/whiz/sqlbuilder"
 	"github.com/homemade/whiz/subscribers"
 )
 
@@ -277,7 +278,17 @@ func runEventLoops(p eventLoopParams) {
 	var err error
 	var locked int64
 	var result sql.Result
-	if result, err = p.DBRW.Exec("INSERT INTO eventz_locks (name,created_at) VALUES(?,NOW(6));", p.LockName); err == nil {
+
+	var s string
+	s, err = sqlbuilder.DriverSpecificSQL{
+		MySQL:    "INSERT INTO eventz_locks (name,created_at) VALUES(?,NOW(6));",
+		Postgres: "INSERT INTO eventz_locks (name,created_at) VALUES($1,NOW());",
+	}.Switch(p.DBRW)
+	if err != nil {
+		logInfo(p.LoggerOutput, fmt.Sprintf("next event loops run failed %v", err))
+		return
+	}
+	if result, err = p.DBRW.Exec(s, p.LockName); err == nil {
 		locked, err = result.RowsAffected()
 	}
 	if err == nil && locked != 1 {
@@ -288,9 +299,15 @@ func runEventLoops(p eventLoopParams) {
 		return
 	}
 	defer func() {
+		s, err = sqlbuilder.DriverSpecificSQL{
+			MySQL:    "DELETE FROM eventz_locks WHERE name = ?;",
+			Postgres: "DELETE FROM eventz_locks WHERE name = $1;",
+		}.Switch(p.DBRW)
 		var unlocked int64
-		if result, err = p.DBRW.Exec("DELETE FROM eventz_locks WHERE name = ?;", p.LockName); err == nil {
-			unlocked, err = result.RowsAffected()
+		if err == nil {
+			if result, err = p.DBRW.Exec(s, p.LockName); err == nil {
+				unlocked, err = result.RowsAffected()
+			}
 		}
 		if err == nil && unlocked != 1 {
 			err = fmt.Errorf("%d locks deleted for %s", unlocked, p.LockName)
@@ -452,19 +469,32 @@ func readEventSourcesFromDB(db *sql.DB) (map[string]models.EventzSource, error) 
 }
 
 func readRoutinesFromDB(db *sql.DB, group uint, errceiling time.Duration) ([]models.EventzSubscriber, error) {
-	routinesSQL := fmt.Sprintf("SELECT name, version, instance, meta_data, priority FROM eventz_subscribers WHERE `group` = %d AND "+
-		"priority > 0 AND `group` IN (SELECT `group` FROM eventz_subscribers GROUP BY `group` "+
-		"HAVING MAX(last_error_at) IS NULL OR MAX(last_error_at) < DATE_SUB(NOW(6),INTERVAL %f SECOND)) "+
-		"ORDER BY priority ASC;", group, errceiling.Seconds())
+
 	result := make([]models.EventzSubscriber, 0)
+
+	routinesSQL := "SELECT name, version, instance, meta_data, priority FROM eventz_subscribers WHERE eventz_subscribers.group = %d AND " +
+		"priority > 0 AND eventz_subscribers.group IN (SELECT eventz_subscribers.group FROM eventz_subscribers GROUP BY eventz_subscribers.group " +
+		"HAVING MAX(last_error_at) IS NULL OR MAX(last_error_at) < "
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    " DATE_SUB(NOW(6),INTERVAL %f SECOND)) ORDER BY priority ASC;",
+		Postgres: " NOW() - INTERVAL '%f SECOND') ORDER BY priority ASC;",
+	}.Switch(db)
+	if err != nil {
+		return result, err
+	}
+
+	routinesSQL = fmt.Sprintf(routinesSQL+s, group, errceiling.Seconds())
+
 	var (
+		rows      *sql.Rows
 		name      string
 		version   string
 		instance  string
 		meta_data sql.NullString
 		priority  uint
 	)
-	rows, err := db.Query(routinesSQL)
+	rows, err = db.Query(routinesSQL)
 	if err != nil {
 		return result, err
 	}
@@ -487,7 +517,18 @@ func readRoutinesFromDB(db *sql.DB, group uint, errceiling time.Duration) ([]mod
 }
 
 func updateLastRunAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
-	result, err := dbRW.Exec("UPDATE eventz_subscribers SET last_run_at = NOW(6) WHERE name = ? AND version = ? AND instance = ?;", sub.Name, sub.Version, sub.Instance)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    " NOW(6) WHERE name = ? AND version = ? AND instance = ?;",
+		Postgres: " NOW() WHERE name = $1 AND version = $2 AND instance = $3;",
+	}.Switch(dbRW)
+	if err != nil {
+		return err
+	}
+	s = "UPDATE eventz_subscribers SET last_run_at = " + s
+
+	var result sql.Result
+	result, err = dbRW.Exec(s, sub.Name, sub.Version, sub.Instance)
 	if err != nil {
 		return err
 	}
@@ -503,7 +544,17 @@ func updateLastRunAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 }
 
 func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
-	result, err := dbRW.Exec("UPDATE eventz_subscribers SET last_error_at = NOW(6) WHERE name = ? AND version = ? AND instance = ?;", sub.Name, sub.Version, sub.Instance)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    "NOW(6) WHERE name = ? AND version = ? AND instance = ?;",
+		Postgres: "NOW() WHERE name = $1 AND version = $2 AND instance = $3;",
+	}.Switch(dbRW)
+	if err != nil {
+		return err
+	}
+	s = "UPDATE eventz_subscribers SET last_error_at = " + s
+	var result sql.Result
+	result, err = dbRW.Exec(s, sub.Name, sub.Version, sub.Instance)
 	if err != nil {
 		return err
 	}
@@ -520,9 +571,19 @@ func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 
 func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzSubscriber, e error, status int, eventid string, res subscribers.Result) {
 
-	stmt, err := dbRW.Prepare(`INSERT INTO eventz_subscriber_error_logs
-(event_id,routine_name,routine_version,routine_instance,error_code,error_message,status,refer_entity,refer_id,created_at)
-VALUES(?,?,?,?,?,?,?,?,?,NOW(6));`)
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    "VALUES(?,?,?,?,?,?,?,?,?,NOW(6));",
+		Postgres: "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW());",
+	}.Switch(dbRW)
+	if err != nil {
+		logError(loggerOutput, err)
+		return
+	}
+	s = `INSERT INTO eventz_subscriber_error_logs
+	(event_id,routine_name,routine_version,routine_instance,error_code,error_message,status,refer_entity,refer_id,created_at)` + s
+
+	var stmt *sql.Stmt
+	stmt, err = dbRW.Prepare(s)
 	if err != nil {
 		logError(loggerOutput, err)
 		return
@@ -577,21 +638,26 @@ func readSubscriberEventsFromDB(db *sql.DB, group uint, priority uint, sources [
 FROM eventz
 WHERE on_hold = 0
 AND sub_grp%d_status = (%d - 1)`, group, priority)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    " AND event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)",
+		Postgres: " AND event_created_at < NOW() - INTERVAL '%d MINUTE'",
+	}.Switch(db)
+	if err != nil {
+		return result, err
+	}
+
 	// sources can be a wild card
 	if sources[0] == "*" {
-		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(`
-		AND event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
-		ORDER BY event_created_at,event_id ASC;`, ceiling)
+		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(s+" ORDER BY event_created_at,event_id ASC;", ceiling)
 	} else { // or a filter
 		eventSources := strings.Join(strings.Fields(fmt.Sprint(sources)), "','")
 		eventSources = strings.Replace(eventSources, "[", "('", 1)
 		eventSources = strings.Replace(eventSources, "]", "')", 1)
-		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(`
-		AND event_source IN %s
-		AND event_created_at < DATE_SUB(NOW(6),INTERVAL %d MINUTE)
-		ORDER BY event_created_at,event_id ASC;`, eventSources, ceiling)
+		subscriberEventsSQL = subscriberEventsSQL + fmt.Sprintf(" AND event_source IN %s "+s+" ORDER BY event_created_at,event_id ASC;", eventSources, ceiling)
 	}
-	rows, err := db.Query(subscriberEventsSQL)
+	var rows *sql.Rows
+	rows, err = db.Query(subscriberEventsSQL)
 	if err != nil {
 		return result, err
 	}
@@ -637,8 +703,18 @@ AND sub_grp%d_status = (%d - 1)`, group, priority)
 }
 
 func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, event models.Eventz, res subscribers.Result) error {
-	stmt := fmt.Sprintf("UPDATE eventz SET sub_grp%d_status = ? WHERE event_id = ?;", sub.Group)
-	result, err := dbRW.Exec(stmt, sub.Priority, event.EventID)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    "UPDATE eventz SET sub_grp%d_status = ? WHERE event_id = ?;",
+		Postgres: "UPDATE eventz SET sub_grp%d_status = $1 WHERE event_id = $2;",
+	}.Switch(dbRW)
+	if err != nil {
+		return err
+	}
+
+	stmt := fmt.Sprintf(s, sub.Group)
+	var result sql.Result
+	result, err = dbRW.Exec(stmt, sub.Priority, event.EventID)
 	if err != nil {
 		return err
 	}
@@ -652,10 +728,17 @@ func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, e
 	}
 
 	if !res.Ignored() {
-		stmt = `INSERT INTO eventz_subscriber_processed_logs
-		(event_id,routine_name,routine_version,routine_instance,meta_data,status,refer_entity,refer_id,created_at)
-		VALUES(?,?,?,?,?,?,?,?,NOW(6));`
 
+		s, err = sqlbuilder.DriverSpecificSQL{
+			MySQL:    "VALUES(?,?,?,?,?,?,?,?,NOW(6));",
+			Postgres: "VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW());",
+		}.Switch(dbRW)
+		if err != nil {
+			return err
+		}
+
+		stmt = `INSERT INTO eventz_subscriber_processed_logs
+		(event_id,routine_name,routine_version,routine_instance,meta_data,status,refer_entity,refer_id,created_at)` + s
 		result, err = dbRW.Exec(stmt, event.EventID, sub.Name, sub.Version, sub.Instance, res.MetaData(), res.Status(), res.ReferEntity(), res.ReferID())
 		if err != nil {
 			return err
@@ -674,8 +757,17 @@ func markSubscriberEventAsProcessed(dbRW *sql.DB, sub models.EventzSubscriber, e
 }
 
 func markSubscriberEventAsOnHold(dbRW *sql.DB, eventid string) error {
-	stmt := "UPDATE eventz SET on_hold = 1 WHERE event_id = ?;"
-	result, err := dbRW.Exec(stmt, eventid)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    "UPDATE eventz SET on_hold = 1 WHERE event_id = ?;",
+		Postgres: "UPDATE eventz SET on_hold = 1 WHERE event_id = $1;",
+	}.Switch(dbRW)
+	if err != nil {
+		return err
+	}
+
+	var result sql.Result
+	result, err = dbRW.Exec(s, eventid)
 	if err != nil {
 		return err
 	}
@@ -691,8 +783,18 @@ func markSubscriberEventAsOnHold(dbRW *sql.DB, eventid string) error {
 }
 
 func resetSubscriberEvent(dbRW *sql.DB, eventid string) error {
-	stmt := "UPDATE eventz SET on_hold = 0 WHERE event_id = ? AND on_hold = 1;"
-	result, err := dbRW.Exec(stmt, eventid)
+
+	s, err := sqlbuilder.DriverSpecificSQL{
+		MySQL:    "? AND on_hold = 1;",
+		Postgres: "$ AND on_hold = 1;",
+	}.Switch(dbRW)
+	if err != nil {
+		return err
+	}
+	s = "UPDATE eventz SET on_hold = 0 WHERE event_id = " + s
+
+	var result sql.Result
+	result, err = dbRW.Exec(s, eventid)
 	if err != nil {
 		return err
 	}
