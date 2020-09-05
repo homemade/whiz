@@ -786,7 +786,7 @@ func resetSubscriberEvent(dbRW *sql.DB, eventid string) error {
 
 	s, err := sqlbuilder.DriverSpecificSQL{
 		MySQL:    "? AND on_hold = 1;",
-		Postgres: "$ AND on_hold = 1;",
+		Postgres: "$1 AND on_hold = 1;",
 	}.Switch(dbRW)
 	if err != nil {
 		return err
