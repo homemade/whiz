@@ -50,7 +50,7 @@ func Parse(request publishers.WebhookRequest, secret string) (hook *publishers.H
 
 	parts := strings.Split(rr.Event.Type, ".")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("failed to parse model and action, expected 2 parts seperated by . but have %d")
+		return nil, fmt.Errorf("failed to parse model and action, expected 2 parts seperated by . but have %d", len(parts))
 	}
 	model := parts[0]
 	action := parts[1]
