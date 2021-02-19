@@ -211,7 +211,7 @@ func (w *Worker) ReProcessSubscriberEvent(eventid string, timeout int) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if w.active {
-		logInfo(w.loggerOutput, fmt.Sprintf("Worker cancelled call to reprocess event as previous run still active after %s seconds %v", timeout, w.status))
+		logInfo(w.loggerOutput, fmt.Sprintf("Worker cancelled call to reprocess event as previous run still active after %d seconds %v", timeout, w.status))
 		return //timeout
 	}
 	// reset the event
