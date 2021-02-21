@@ -1,0 +1,38 @@
+version: '2'
+
+services:
+
+  whiz:
+    container_name: "whiz"
+    image: golang:1.16
+    volumes:
+      - ".:/go/src/github.com/homemade/whiz"
+    working_dir: "/go/src/github.com/homemade/whiz"
+    command: 
+      bash -c "echo 'Ready to connect (docker exec -it whiz /bin/bash)' && tail -f /dev/null"
+    depends_on:
+      - whiz_mysql
+      - whiz_postgres
+
+  whiz_mysql:
+    container_name: "whiz_mysql"
+    image: mysql:5.7.19
+    volumes:
+     - "./.mysql/conf.d:/etc/mysql/conf.d"
+    restart: always
+    environment:
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+      - MYSQL_ROOT_PASSWORD=
+      - MYSQL_DATABASE=whiz
+    ports:
+      - "3306:3306"
+
+  whiz_postgres:
+      container_name: "whiz_postgres"
+      image: postgres:12
+      restart: always
+      environment:
+        - POSTGRES_USER=whiz
+        - POSTGRES_PASSWORD=password123
+      ports:
+        - "5432:5432"
