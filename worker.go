@@ -82,6 +82,15 @@ func (e errWithCause) Cause() error {
 	return e.cause
 }
 
+type subscriberError struct {
+	sub     models.EventzSubscriber
+	err     error
+	status  int
+	eventID string
+	res     subscribers.Result
+	cause   error
+}
+
 func NewWorker(dbRW *sql.DB, reg subscribers.Registry, loggeroutput io.Writer, options ...func(*Worker) error) (*Worker, error) {
 	lockName := "whiz-worker"          // default
 	pollingInterval := 1 * time.Minute // default
@@ -413,10 +422,16 @@ func runEventLoops(p eventLoopParams) {
 						if err2 := updateLastErrorAtInDB(p.DBRW, r); err2 != nil {
 							logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to update last_error_at during execution of %s", r.Desc()), err2})
 						}
-						// try and also add error to the log table
-						insertIntoErrorLog(p.LoggerOutput, p.DBRW, r, err, status, e.EventID, procResult)
-
-						// dont break out of the loop for skippable errors - these will be left on hold
+						// also try and add subscriber error to the log table
+						insertIntoSubscriberErrorLog(p.LoggerOutput, p.DBRW, subscriberError{
+							sub:     r,
+							err:     err,
+							status:  status,
+							eventID: e.EventID,
+							res:     procResult,
+							cause:   sr.CauseOfError(err),
+						})
+						// dont break out of the loop for skippable errors
 						if !skippableError {
 							break
 						}
@@ -569,7 +584,7 @@ func updateLastErrorAtInDB(dbRW *sql.DB, sub models.EventzSubscriber) error {
 	return nil
 }
 
-func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzSubscriber, e error, status int, eventid string, res subscribers.Result) {
+func insertIntoSubscriberErrorLog(loggerOutput io.Writer, dbRW *sql.DB, se subscriberError) {
 
 	s, err := sqlbuilder.DriverSpecificSQL{
 		MySQL:    "VALUES(?,?,?,?,?,?,?,?,?,NOW(6));",
@@ -595,11 +610,7 @@ func insertIntoErrorLog(loggerOutput io.Writer, dbRW *sql.DB, sub models.EventzS
 			return
 		}
 	}()
-	var cause error
-	if ec, ok := e.(ErrorWithCause); ok {
-		cause = ec.Cause()
-	}
-	_, err = stmt.Exec(eventid, sub.Name, sub.Version, sub.Instance, status, fmt.Sprintf("Error: %v \nCause: %v", e, cause), res.Status(), res.ReferEntity(), res.ReferID())
+	_, err = stmt.Exec(se.eventID, se.sub.Name, se.sub.Version, se.sub.Instance, se.status, fmt.Sprintf("Error: %v \nCause: %v", se.err, se.cause), se.res.Status(), se.res.ReferEntity(), se.res.ReferID())
 	if err != nil {
 		logError(loggerOutput, err)
 		return

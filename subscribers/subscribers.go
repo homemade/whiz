@@ -20,6 +20,7 @@ type Routine interface {
 	EventLoopCeiling() int
 	ProcessEvent(event Event) (Result, error)
 	AssertError(err error) (temporary bool, skippable bool, status int)
+	CauseOfError(err error) error
 }
 
 type Event interface {
