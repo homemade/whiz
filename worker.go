@@ -365,7 +365,7 @@ func runEventLoops(p eventLoopParams) {
 				return
 			}
 			logMetrics(p.LoggerOutput, fmt.Sprintf("worker_routines:%d", grp), len(dbRoutines), time.Since(p.Started).Seconds())
-			for _, r := range dbRoutines {
+			for _, r := range dbRoutines { // for each subscriber routine
 				var sr subscribers.Routine
 				sr, err = p.Registry.LoadRoutine(subscribers.Definition{
 					Name:     r.Name,
@@ -403,7 +403,7 @@ func runEventLoops(p eventLoopParams) {
 					var procResult subscribers.Result
 					procResult, err = sr.ProcessEvent(e)
 					if err != nil {
-						temporaryError, skippableError, status := sr.AssertError(err)
+						temporaryError, status := sr.AssertError(err)
 						if !temporaryError { // we don't put events on hold for temporary errors - we will try again later
 							if dberr := markSubscriberEventAsOnHold(p.DBRW, e.EventID); dberr != nil {
 								logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to mark event#%s as onhold", e.EventID), dberr})
@@ -422,7 +422,7 @@ func runEventLoops(p eventLoopParams) {
 						if err2 := updateLastErrorAtInDB(p.DBRW, r); err2 != nil {
 							logError(p.LoggerOutput, errWithCause{fmt.Sprintf("failed to update last_error_at during execution of %s", r.Desc()), err2})
 						}
-						// also try and add subscriber error to the log table
+						// also try and record the subscriber error in the log table
 						insertIntoSubscriberErrorLog(p.LoggerOutput, p.DBRW, subscriberError{
 							sub:     r,
 							err:     err,
@@ -431,10 +431,8 @@ func runEventLoops(p eventLoopParams) {
 							res:     procResult,
 							cause:   sr.CauseOfError(err),
 						})
-						// dont break out of the loop for skippable errors
-						if !skippableError {
-							break
-						}
+						// we always break out of the event loop for this subscriber routine on error
+						break
 
 					} else {
 						processedEvents = processedEvents + 1

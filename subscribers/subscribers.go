@@ -19,7 +19,7 @@ type Routine interface {
 	EventSources() []string
 	EventLoopCeiling() int
 	ProcessEvent(event Event) (Result, error)
-	AssertError(err error) (temporary bool, skippable bool, status int)
+	AssertError(err error) (temporary bool, status int)
 	CauseOfError(err error) error
 }
 
